@@ -14,35 +14,35 @@
 
 namespace ss = seastar;
 namespace ws = seastar::experimental::websocket;
+namespace po = boost::program_options;
 
-static ss::logger lg("wsrp");
+static ss::logger lg{"wsrp"};
+
+ss::future<> handler(ss::input_stream<char>& in, ss::output_stream<char>& out) {
+    return ss::repeat([&in, &out] {
+        return in.read().then([&out](ss::temporary_buffer<char> buf) {
+            // Check for disconnect.
+            if (buf.empty()) {
+                return make_ready_future<ss::stop_iteration>(
+                  ss::stop_iteration::yes);
+            }
+
+            lg.info("got {} bytes", buf.size());
+            return out.write(std::move(buf)).then([&out] {
+                return out.flush().then([] {
+                    return make_ready_future<ss::stop_iteration>(
+                      ss::stop_iteration::no);
+                });
+            });
+        });
+    });
+}
 
 class wsrp_service {
     ss::socket_address _sa;
     std::optional<ws::server> _ws;
 
     // Static for now as w don't need any service state.
-
-    static ss::future<>
-    handler(ss::input_stream<char>& in, ss::output_stream<char>& out) {
-        return ss::repeat([&in, &out] {
-            return in.read().then([&out](ss::temporary_buffer<char> buf) {
-                // Check for disconnect.
-                if (buf.empty()) {
-                    return make_ready_future<ss::stop_iteration>(
-                      ss::stop_iteration::yes);
-                }
-
-                lg.info("got {} bytes", buf.size());
-                return out.write(std::move(buf)).then([&out] {
-                    return out.flush().then([] {
-                        return make_ready_future<ss::stop_iteration>(
-                          ss::stop_iteration::no);
-                    });
-                });
-            });
-        });
-    }
 
 public:
     wsrp_service(ss::socket_address sa)
@@ -52,7 +52,7 @@ public:
 
     ss::future<> run() {
         try {
-	    _ws->register_handler("dumb-ws", handler);
+            _ws->register_handler("dumb-ws", handler);
             _ws->listen(_sa, {true});
         } catch (std::system_error& e) {
             lg.error("failed to listen on {}: {}", _sa, e);
@@ -74,15 +74,23 @@ public:
     }
 };
 
+
 // Put it in the global scope so it outlives most things.
 ss::sharded<wsrp_service> s;
 
+
 int main(int argc, char** argv) {
     ss::app_template app;
-    auto sa = ss::socket_address(ss::ipv4_addr("127.0.0.1", 8088));
+
+    auto opts = app.add_options();
+    opts("address", po::value<std::string>()->default_value("127.0.0.1"), "listen address");
 
     return app.run(argc, argv, [&] {
-        return s.start(sa)
+	auto& config = app.configuration();
+	auto& addr = config["address"].as<std::string>();
+	auto sa = ss::socket_address(ss::ipv4_addr(addr, 8088));
+
+	return s.start(sa)
           .then([] {
               return s
                 // Start our service on all shards.
